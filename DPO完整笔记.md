@@ -83,7 +83,9 @@ DPO 的洞见是：既然 $r$ 和 $\pi^*$ 一一对应，那我**直接去求 $\
 
 RLHF 的目标（对某个固定的 $x$ ）：
 
-$$ \max_{\pi}\ \underbrace{\mathbb{E}_{y\sim\pi}\big[\,r(x,y)\,\big]}_{\text{奖励要高}} - \beta\cdot\underbrace{\mathrm{KL}\big(\pi(\cdot\mid x)\,\|\,\pi_{\text{ref}}(\cdot\mid x)\big)}_{\text{但别离 SFT 模型太远}} $$
+$$ \max_{\pi}\ \mathbb{E}_{y\sim\pi}\big[\,r(x,y)\,\big] \;-\; \beta\cdot\mathrm{KL}\big(\pi(\cdot\mid x)\,\|\,\pi_{\text{ref}}(\cdot\mid x)\big) $$
+
+前一项 $\mathbb{E}[r]$ 要**奖励高**；后一项（KL 惩罚）要求**别离 SFT 模型 $\pi_{\text{ref}}$ 太远**。
 
 这个"奖励最大化 + KL 拉住"的优化问题，有**已知的闭式解**（可用拉格朗日乘子推，结论记住即可）：
 
@@ -207,7 +209,9 @@ $$ \nabla_\theta \mathcal{L}_{\text{DPO}} \;\propto\; -\,\sigma\big(\beta(s_l - 
 | chosen $y_w$ | 0.10 | 0.20 | $\log 2 \approx +0.69$ （概率翻倍） |
 | rejected $y_l$ | 0.10 | 0.05 | $\log 0.5 \approx -0.69$ （概率减半） |
 
-$$ s_w - s_l = 0.69 - (-0.69) = 1.38 \;\; (>0,\ \text{方向对}) $$
+$$ s_w - s_l = 0.69 - (-0.69) = 1.38 \quad (>0) $$
+
+差为正，方向对（模型确实更偏向 chosen）。
 
 $$ \beta(s_w - s_l) = 0.1 \times 1.38 = 0.138, \qquad \mathcal{L} = -\log \sigma(0.138) \approx 0.63 $$
 
