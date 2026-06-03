@@ -72,10 +72,10 @@ $$ \mathcal{L}_{\text{DPO}} \approx -\frac{1}{N}\sum_{i=1}^{N} \log\sigma\big(\b
 
 ### 先抓住一句话（全篇的灵魂）
 
-> **奖励 $r$ 和"最优策略 $\pi^*$"是一一对应的——知道其中一个，就等价于知道另一个。**
+> **奖励 $r$ 和"最优策略 $\pi^{\ast}$"是一一对应的——知道其中一个，就等价于知道另一个。**
 
 经典 RLHF 是：先训出奖励 $r$ ，再用 RL 求出对应的最优策略 $\pi$ 。
-DPO 的洞见是：既然 $r$ 和 $\pi^*$ 一一对应，那我**直接去求 $\pi^*$ 就行了，根本不用先经过 $r$ 这个中间商**。
+DPO 的洞见是：既然 $r$ 和 $\pi^{\ast}$ 一一对应，那我**直接去求 $\pi^{\ast}$ 就行了，根本不用先经过 $r$ 这个中间商**。
 
 下面四步就是把这句话变成公式。
 
@@ -89,7 +89,7 @@ $$ \max_{\pi}\ \mathbb{E}_{y\sim\pi}\big[\,r(x,y)\,\big] \;-\; \beta\cdot\mathrm
 
 这个"奖励最大化 + KL 拉住"的优化问题，有**已知的闭式解**（可用拉格朗日乘子推，结论记住即可）：
 
-$$ \pi^*(y\mid x) = \frac{1}{Z(x)}\,\pi_{\text{ref}}(y\mid x)\,\exp\!\Big(\frac{r(x,y)}{\beta}\Big) $$
+$$ \pi^{\ast}(y\mid x) = \frac{1}{Z(x)}\,\pi_{\text{ref}}(y\mid x)\,\exp\!\Big(\frac{r(x,y)}{\beta}\Big) $$
 
 **直觉**：最优策略 = 在 SFT 模型 $\pi_{\text{ref}}$ 的基础上，**按奖励高低做重新加权**——奖励高的回答 $\exp(r/\beta)$ 这个因子大、概率被放大；奖励低的被压低。
 
@@ -97,19 +97,19 @@ $Z(x)$ 是**配分函数**，就是个归一化分母：
 
 $$ Z(x) = \sum_{y} \pi_{\text{ref}}(y\mid x)\,\exp\!\Big(\frac{r(x,y)}{\beta}\Big) $$
 
-它的作用只是保证 $\pi^*(y\mid x)$ 加起来等于 $1$ （是个合法概率分布）。**注意：它要对"所有可能的回答 $y$"求和，根本算不出来**——这是 RLHF 难算的根源之一。先记住：**$Z(x)$ 只跟 $x$ 有关，跟具体回答 $y$ 无关。**
+它的作用只是保证 $\pi^{\ast}(y\mid x)$ 加起来等于 $1$ （是个合法概率分布）。**注意：它要对"所有可能的回答 $y$"求和，根本算不出来**——这是 RLHF 难算的根源之一。先记住：**$Z(x)$ 只跟 $x$ 有关，跟具体回答 $y$ 无关。**
 
 ### Step 2：把式子反过来，用策略表达奖励
 
-上面那个 $\pi^*$ 的式子，两边取 log：
+上面那个 $\pi^{\ast}$ 的式子，两边取 log：
 
-$$ \log \pi^*(y\mid x) = \log \pi_{\text{ref}}(y\mid x) + \frac{r(x,y)}{\beta} - \log Z(x) $$
+$$ \log \pi^{\ast}(y\mid x) = \log \pi_{\text{ref}}(y\mid x) + \frac{r(x,y)}{\beta} - \log Z(x) $$
 
 移项解出 $r$ ：
 
-$$ r(x,y) = \beta\,\log\frac{\pi^*(y\mid x)}{\pi_{\text{ref}}(y\mid x)} + \beta\log Z(x) $$
+$$ r(x,y) = \beta\,\log\frac{\pi^{\ast}(y\mid x)}{\pi_{\text{ref}}(y\mid x)} + \beta\log Z(x) $$
 
-**这一步就是"灵魂那句话"的数学形式**：奖励 $r$ 完全可以用"最优策略 $\pi^*$ 与参考策略 $\pi_{\text{ref}}$ 的对数比"表达出来。唯一碍眼的就是尾巴上那个 $\beta\log Z(x)$ （算不出来的那一项）。
+**这一步就是"灵魂那句话"的数学形式**：奖励 $r$ 完全可以用"最优策略 $\pi^{\ast}$ 与参考策略 $\pi_{\text{ref}}$ 的对数比"表达出来。唯一碍眼的就是尾巴上那个 $\beta\log Z(x)$ （算不出来的那一项）。
 
 ### Step 3：代进偏好模型，$Z(x)$ 自动消失 ✨
 
@@ -122,9 +122,9 @@ $$ P(y_w \succ y_l) = \sigma\big(r(x,y_w) - r(x,y_l)\big) $$
 $$
 \begin{aligned}
 r(x,y_w) - r(x,y_l)
-&= \Big[\beta\log\tfrac{\pi^*(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} + \beta\log Z(x)\Big] \\
-&\quad - \Big[\beta\log\tfrac{\pi^*(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)} + \beta\log Z(x)\Big] \\
-&= \beta\log\frac{\pi^*(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta\log\frac{\pi^*(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}
+&= \Big[\beta\log\tfrac{\pi^{\ast}(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} + \beta\log Z(x)\Big] \\
+&\quad - \Big[\beta\log\tfrac{\pi^{\ast}(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)} + \beta\log Z(x)\Big] \\
+&= \beta\log\frac{\pi^{\ast}(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta\log\frac{\pi^{\ast}(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}
 \end{aligned}
 $$
 
@@ -134,24 +134,24 @@ $$
 
 消掉后：
 
-$$ P(y_w \succ y_l) = \sigma\Big(\beta\log\frac{\pi^*(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta\log\frac{\pi^*(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big) $$
+$$ P(y_w \succ y_l) = \sigma\Big(\beta\log\frac{\pi^{\ast}(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta\log\frac{\pi^{\ast}(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big) $$
 
-整个式子里**只剩 $\pi^*$ 和 $\pi_{\text{ref}}$ ，奖励 $r$ 和 $Z(x)$ 都没了**。
+整个式子里**只剩 $\pi^{\ast}$ 和 $\pi_{\text{ref}}$ ，奖励 $r$ 和 $Z(x)$ 都没了**。
 
-### Step 4：最后一跃 —— 把要训的模型 $\pi_\theta$ 当作 $\pi^*$
+### Step 4：最后一跃 —— 把要训的模型 $\pi_\theta$ 当作 $\pi^{\ast}$
 
-上式里的 $\pi^*$ 是"理论最优策略"，我们不知道它是谁。DPO 的做法：**就用正在训练的模型 $\pi_\theta$ 去充当这个 $\pi^*$**，然后在偏好数据上做**最大似然**（让模型给"chosen 优于 rejected"这个事实尽量高的概率）。取负对数似然，就是 DPO loss：
+上式里的 $\pi^{\ast}$ 是"理论最优策略"，我们不知道它是谁。DPO 的做法：**就用正在训练的模型 $\pi_\theta$ 去充当这个 $\pi^{\ast}$**，然后在偏好数据上做**最大似然**（让模型给"chosen 优于 rejected"这个事实尽量高的概率）。取负对数似然，就是 DPO loss：
 
 $$ \mathcal{L}_{\text{DPO}} = -\,\mathbb{E}_{(x,\,y_w,\,y_l)}\Big[\log \sigma\Big(\beta\log\frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta\log\frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big)\Big] $$
 
 这正是第一部分给出的 loss（把 $s_w,\,s_l$ 的定义代回即得，只是这里写成了展开形式）。
 
-**这就是魔法所在**：当你用这个 loss 把 $\pi_\theta$ 训到能满足所有偏好对时，数学上保证了—— $\pi_\theta$ 就是那个"经典 RLHF 要费尽周折（训 RM + 跑 PPO）才能得到的最优策略 $\pi^*$"。中间的奖励模型被"折叠"进了策略本身，**一步到位，不用 RL**。
+**这就是魔法所在**：当你用这个 loss 把 $\pi_\theta$ 训到能满足所有偏好对时，数学上保证了—— $\pi_\theta$ 就是那个"经典 RLHF 要费尽周折（训 RM + 跑 PPO）才能得到的最优策略 $\pi^{\ast}$"。中间的奖励模型被"折叠"进了策略本身，**一步到位，不用 RL**。
 
 ### 一句话收尾
 
 - **经典 RLHF**： 偏好 $\to$ 训奖励模型 $r$ $\to$ 跑 RL 求 $\pi$ （三步，绕）。
-- **DPO**：利用" $r$ 和 $\pi^*$ 一一对应"，把这条链**短路**成 偏好 $\to$ 直接训 $\pi$ （一步）；而"奖励差"这个形式让只依赖 $x$ 的 $Z(x)$ 天然对消，于是那个算不出来的归一化项压根不用管。
+- **DPO**：利用" $r$ 和 $\pi^{\ast}$ 一一对应"，把这条链**短路**成 偏好 $\to$ 直接训 $\pi$ （一步）；而"奖励差"这个形式让只依赖 $x$ 的 $Z(x)$ 天然对消，于是那个算不出来的归一化项压根不用管。
 
 ---
 
@@ -342,8 +342,8 @@ A：起点是 KL 约束下的 RLHF 目标；核心 trick 是它的闭式最优�
 **Q3：DPO 为什么不需要奖励模型？（"奖励模型被折叠进策略"是什么意思）**
 A：由 $r(x,y)=\beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}+\beta\log Z(x)$ ，策略本身就隐式定义了一个奖励—— $\pi_\theta$ 自己就是隐式奖励模型，所以无需再单独训练 RM。这就是"奖励模型被折叠进了策略"。
 
-**Q4：DPO loss 里为什么是 $\pi_\theta$ 而不是 $\pi^*$ ？**
-A：$\pi^*$ 是未知的理论最优策略。DPO 用可训练的 $\pi_\theta$ 去参数化（充当）$\pi^*$ ，在偏好数据上做最大似然；训练收敛时 $\pi_\theta$ 即逼近 $\pi^*$ 。
+**Q4：DPO loss 里为什么是 $\pi_\theta$ 而不是 $\pi^{\ast}$ ？**
+A：$\pi^{\ast}$ 是未知的理论最优策略。DPO 用可训练的 $\pi_\theta$ 去参数化（充当）$\pi^{\ast}$ ，在偏好数据上做最大似然；训练收敛时 $\pi_\theta$ 即逼近 $\pi^{\ast}$ 。
 
 **Q5：配分函数 $Z(x)$ 为什么能消掉 / 不用计算？**
 A：$Z(x)$ 需对所有可能回答求和，不可解；但它只依赖 $x$ 。偏好建模只看同一 $x$ 下两回答的**奖励差**，做差时两个相同的 $\beta\log Z(x)$ 对消，所以最终 loss 既不含、也无需计算 $Z(x)$ 。
