@@ -42,7 +42,7 @@ $$ s_w = \log \pi_\theta(y_w \mid x) - \log \pi_{\text{ref}}(y_w \mid x) $$
 
 $$ s_l = \log \pi_\theta(y_l \mid x) - \log \pi_{\text{ref}}(y_l \mid x) $$
 
-$\sigma$ 为 sigmoid， $\beta$ 为温度系数（控制偏离参考模型的力度，minimind 里一般取 $0.1$ ）。
+$\sigma$ 为 sigmoid， $\beta$ 为温度系数（控制偏离参考模型的力度）。minimind 的 `train_dpo.py` 命令行**默认 $\beta = 0.15$**（`--beta` 参数；常见取值区间 $0.1\sim0.5$，越小越贴近 ref）。
 
 **关于 $\mathbb{E}$ （数学期望）**：它就是期望算子。下标 $(x, y_w, y_l)$ 表示"对谁求期望"——对偏好数据集 $\mathcal{D}$ （即 `dpo.jsonl`）中抽出的三元组（prompt、chosen、rejected）求期望，写全是 $\mathbb{E}_{(x,\,y_w,\,y_l)\sim \mathcal{D}}[\,\cdot\,]$ 。实践中没有真实分布、只有有限样本，所以用 **batch 内的样本均值**近似它（蒙特卡洛估计）：
 
@@ -56,6 +56,7 @@ $$ \mathcal{L}_{\text{DPO}} \approx -\frac{1}{N}\sum_{i=1}^{N} \log\sigma\big(\b
 
 - **$\pi_\theta$**：正在训练的策略模型，从 `full_sft` 权重初始化。
 - **$\pi_{\text{ref}}$**：参考模型，**冻结的 SFT 模型副本**（训练全程不更新）。
+- **$\log \pi(y \mid x)$ 不是一个标量魔法**：它 = 回答 $y$ 里**每个 token 的对数概率之和**，而且**只算回答部分**（prompt 不计）。代码里就是 `logits_to_log_probs`（对每个 token 做 `log_softmax` + `gather`）再 `(log_probs * mask).sum(dim=1)` —— 这个 `mask` 正是"只算 assistant 回答"的开关。详见 [第五部分](#第五部分minimind-代码逐行对照) 的逐行对照。
 - **$s_w$**：chosen 在"新模型 vs 老模型"下的对数概率变化，希望它**变大**。
 - **$s_l$**：rejected 的同样量，希望它**变小**。
 - **$\beta(s_w - s_l)$**：本质是 chosen 相对 rejected 的"隐式奖励差"。套上 $-\log \sigma(\cdot)$ 就是一个**让 chosen 隐式奖励高于 rejected 的二分类交叉熵**。
@@ -239,11 +240,121 @@ $$ \beta(s_w - s_l) = 0.1 \times 1.38 = 0.138, \qquad \mathcal{L} = -\log \sigma
 - **只优化相对差**：可能压低 chosen 绝对概率。
 - 显存上要同时持有 $\pi_\theta$ 和冻结的 $\pi_{\text{ref}}$ （但 ref 不回传，开销可控）。
 
-这些局限催生了两条改进路线：① **变体**（IPO / KTO / SimPO，见第五部分）对其中几条对症下药；② **在线 RL**（GRPO，见第六部分）从根上解决“离线、不探索”的问题。
+这些局限催生了两条改进路线：① **变体**（IPO / KTO / SimPO，见第六部分）对其中几条对症下药；② **在线 RL**（GRPO，见第七部分）从根上解决“离线、不探索”的问题。
 
 ---
 
-## 第五部分：DPO 的主流变体（IPO / KTO / SimPO）
+## 第五部分：minimind 代码逐行对照
+
+> 把前四部分的符号，一个个钉到 `trainer/train_dpo.py` + `dataset/lm_dataset.py` 的真实代码上。读完这节，公式就不再是悬空的数学，而是"哦，原来 $\log \pi(y \mid x)$ 就是那一行 `.sum(dim=1)` "。
+>
+> 文件：`minimind/trainer/train_dpo.py`（训练主体）、`minimind/dataset/lm_dataset.py` 的 `DPODataset`（造数据）。
+
+### 0. 全景：数据怎么流过两个模型
+
+```python
+# train_dpo.py 第 5、6 步：一份权重，初始化出两个模型
+model, tokenizer = init_model(lm_config, args.from_weight)   # 策略 π_θ，要训练
+ref_model, _     = init_model(lm_config, args.from_weight)   # 参考 π_ref，冻结
+ref_model.eval(); ref_model.requires_grad_(False)            # ← π_ref 全程不更新
+```
+
+`--from_weight` 默认 `full_sft` —— 两个模型**都从同一份 SFT 权重出发**，训练开始的一瞬间 $\pi_\theta = \pi_{\text{ref}}$ ，loss 里的 $s_w, s_l$ 都为 0；之后只有 $\pi_\theta$ 被优化器推动，两者逐渐分开。这就是第一部分"冻结的 SFT 副本"那句话的代码真身。
+
+### 1. $\log \pi(y \mid x)$ ：逐 token 求和，且只算回答部分
+
+公式里轻飘飘一个 $\log \pi_\theta(y_w \mid x)$ ，代码要分两步算出来。
+
+**第一步**——每个 token 的对数概率（`logits_to_log_probs`）：
+
+```python
+def logits_to_log_probs(logits, labels):
+    log_probs = F.log_softmax(logits, dim=2)                       # 词表维度归一化 → 每个位置每个词的 log 概率
+    return torch.gather(log_probs, dim=2,
+                        index=labels.unsqueeze(2)).squeeze(-1)     # 只挑出"真实下一个 token"那一项
+```
+
+`gather` 的作用：在 `vocab_size` 那一维，把**实际出现的那个 token** 的 log 概率挑出来。输出 shape `(batch, seq_len)` —— 每个位置一个标量 $\log p(\text{该 token})$ 。
+
+**第二步**——求和成"整句话的对数概率"，且用 `mask` 屏蔽 prompt（`dpo_loss` 开头两行）：
+
+```python
+ref_log_probs    = (ref_log_probs * mask).sum(dim=1)      # Σ over tokens，mask=0 的位置被清零
+policy_log_probs = (policy_log_probs * mask).sum(dim=1)
+```
+
+这一行就是数学事实 $\log \pi(y \mid x) = \sum_{t} \log \pi(y_t \mid x, y_{<t})$ ——**序列对数概率 = 各 token 对数概率之和**。而 `mask` 来自 `DPODataset.generate_loss_mask`：它扫描 `<bos>assistant\n ... <eos>` 区间，**只把 assistant 回答的 token 标 1**，prompt 和 special token 标 0。所以"只算回答部分"不是口号，是这个 mask 实现的。
+
+> 🔑 **最容易悬空的一点**：很多人以为 $\pi(y \mid x)$ 是模型直接吐出的一个数。不是。它是**回答里每个 token 的 log 概率，被 mask 选中后加起来**。理解了这行 `.sum`，DPO 的"概率涨跌"才落地。
+
+### 2. $\beta(s_w - s_l)$ ：代码为什么拆成 pi / ref 两组
+
+`dpo_loss` 把拼在一起的 batch 前一半当 chosen、后一半当 rejected，再算那个差：
+
+```python
+chosen_policy_log_probs = policy_log_probs[:batch_size // 2]   # log π_θ(y_w|x)
+reject_policy_log_probs = policy_log_probs[batch_size // 2:]   # log π_θ(y_l|x)
+chosen_ref_log_probs    = ref_log_probs[:batch_size // 2]      # log π_ref(y_w|x)
+reject_ref_log_probs    = ref_log_probs[batch_size // 2:]      # log π_ref(y_l|x)
+
+pi_logratios  = chosen_policy_log_probs - reject_policy_log_probs   # log π_θ(y_w) - log π_θ(y_l)
+ref_logratios = chosen_ref_log_probs   - reject_ref_log_probs       # log π_ref(y_w) - log π_ref(y_l)
+logits = pi_logratios - ref_logratios                               # = (s_w - s_l)
+loss = -F.logsigmoid(beta * logits)                                 # = -log σ(β(s_w - s_l))
+return loss.mean()                                                  # ← 这个 .mean() 就是 𝔼
+```
+
+注意代码的**分组方式和笔记公式不同**：
+
+- 笔记按"样本"分组： $s_w = \log\pi_\theta(y_w) - \log\pi_{\text{ref}}(y_w)$ ，再 $s_w - s_l$ 。
+- 代码按"模型"分组：先 `pi_logratios`（两个回答在策略下的差）、`ref_logratios`（两个回答在参考下的差），再相减。
+
+两者代数完全等价（就是加减法重排），代码这么写是因为 `policy_log_probs` 和 `ref_log_probs` 本来就是两次独立 forward 的产物，按模型分组更顺手。最后 `-F.logsigmoid(beta * logits)` 一字不差对应 $-\log \sigma\big(\beta(s_w - s_l)\big)$ ，`.mean()` 就是第一部分讲的"用 batch 均值近似 $\mathbb{E}$ "。
+
+### 3. 一次 forward 跑两个回答：对称性的工程红利
+
+第三部分讲过 chosen / rejected 在 loss 里是对称的。代码把这个对称性变成了省一半算力的技巧——**拼 batch、跑一次、再切开**：
+
+```python
+x = torch.cat([x_chosen, x_rejected], dim=0)   # 上半 batch=chosen，下半=rejected
+# ... 一次 model(x) 就同时算完两组，再用 [:bs//2] / [bs//2:] 切回来
+```
+
+所以 `--batch_size 4` 时，实际进 forward 的是 8 条序列。
+
+### 4. $\pi_{\text{ref}}$ 不回传：省显存的关键
+
+```python
+with torch.no_grad():            # ← 参考模型这趟前向不建计算图
+    ref_outputs = ref_model(x)
+ref_log_probs = logits_to_log_probs(ref_outputs.logits, y)
+```
+
+`ref_model` 既 `requires_grad_(False)` 又裹在 `torch.no_grad()` 里，所以它**只提供一个固定的 log 概率基准**，不占梯度/优化器显存。这呼应第四部分"显存要持有两个模型，但 ref 不回传、开销可控"。
+
+### 5. 容易被忽略的 `aux_loss`（MoE 时才非零）
+
+```python
+loss = dpo_loss_val + outputs.aux_loss        # 总 loss = DPO loss + MoE 负载均衡损失
+```
+
+当 `--use_moe 1` 时，模型是 MoE 结构，`aux_loss` 是**专家负载均衡损失**（防止所有 token 都挤向同一个专家）；稠密模型下它恒为 0。日志里 `dpo_loss` 和 `aux_loss` 是分开打印的，盯指标时主要看 `dpo_loss`。
+
+### 6. 超参对照表（命令行默认值 → 对应笔记里的哪句话）
+
+| 命令行参数 | 默认值 | 对应笔记概念 |
+|---|---|---|
+| `--from_weight` | `full_sft` | $\pi_\theta$ 和 $\pi_{\text{ref}}$ 的共同起点（第一部分） |
+| `--beta` | `0.15` | 温度系数 $\beta$ ，KL 约束强度（第一/三部分） |
+| `--learning_rate` | `4e-8` | 极小 lr，注释明写"建议 ≤5e-8 避免遗忘"——正是第四部分"DPO 易压低 chosen 概率/遗忘"的实战对策 |
+| `--epochs` | `1` | 偏好对齐通常只过 1 轮，多了易过拟合（呼应第六部分 IPO 的动机） |
+| `--max_seq_len` | `1024` | 序列截断长度，影响上面 `.sum(dim=1)` 的求和范围 |
+
+> 💡 一个值得记的细节：`4e-8` 这个 lr 小到离谱（SFT 常用 `5e-4`，差了 4 个数量级）。这不是笔误——DPO 在已对齐的模型上做**微调中的微调**，步子一大就把 SFT 学到的能力冲垮（即"对齐税 / 遗忘"）。**理论上的"DPO 易遗忘"警告，在代码里就固化成了这个超小 lr。**
+
+---
+
+## 第六部分：DPO 的主流变体（IPO / KTO / SimPO）
 
 > 记忆法：**每个变体 = 针对 DPO 的一个毛病开的药。**
 >
@@ -299,7 +410,7 @@ minimind 模型小、训练几分钟一轮，可在**同一份偏好数据**上�
 
 ---
 
-## 第六部分：DPO 与对比学习（通往 GRPO 的桥）
+## 第七部分：DPO 与对比学习（通往 GRPO 的桥）
 
 DPO 本质上**就是一种对比学习**——学界也有方法直接叫 Contrastive Preference Learning (CPL)，SimPO/DPO 常被描述成 contrastive 式目标。对应关系几乎一一对得上：
 
@@ -371,3 +482,9 @@ A：**不需要成对数据**，只要每条样本一个"好/坏"标签，数据
 
 **Q13：IPO 和 DPO 的根本差别？**
 A：损失函数形状——DPO 用 log-sigmoid（可被推向无穷、易过拟合），IPO 用平方损失把 margin 拉回固定目标，**保住了 KL 正则**。
+
+**Q14：代码里 $\log \pi(y \mid x)$ 是怎么算出来的？（手撕级）**
+A：两步。① `log_softmax` 后用 `torch.gather` 按真实 token 挑出每个位置的对数概率，得到 `(batch, seq_len)` 的逐 token log-prob；② 乘上 loss mask 再 `.sum(dim=1)`，把回答区间的 token 对数概率加起来。本质是 $\log \pi(y \mid x) = \sum_t \log \pi(y_t \mid x, y_{<t})$ ，且 **mask 保证只统计 assistant 回答、不含 prompt**。
+
+**Q15：DPO 训练里为什么把 chosen 和 rejected 拼成一个 batch 跑？lr 又为什么取得极小（如 `4e-8`）？**
+A：① chosen / rejected 在 loss 里完全对称，拼 `torch.cat` 后**一次 forward** 算完两组再 `[:bs//2]` / `[bs//2:]` 切开，省一半前向开销；ref 模型同理。② lr 极小是因为 DPO 是在已对齐模型上"微调中的微调"，步子一大就冲垮 SFT 学到的能力（对齐税 / 灾难性遗忘），所以工程上把"DPO 易遗忘"这条理论警告固化成了超小学习率。
